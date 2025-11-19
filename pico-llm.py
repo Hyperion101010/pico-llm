@@ -144,6 +144,29 @@ def compute_next_token_loss(logits, tokens):
     return F.cross_entropy(preds, gold)
 
 
+class KGramNet(nn.Module):
+    """Helper module to convert one-hot to embeddings and pass through MLP"""
+    def __init__(self, vocab_size, k, embed_size, mlp):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.k = k
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.mlp = mlp
+    
+    def forward(self, x):
+        # x is (batch, k*vocab_size) - flattened one-hot
+        batch_size = x.shape[0]
+        # Reshape to recover token indices from one-hot
+        x_reshaped = x.view(batch_size, self.k, self.vocab_size)
+        indices = torch.argmax(x_reshaped, dim=2)  # (batch, k)
+        # Use embedding
+        embedded = self.embedding(indices)  # (batch, k, embed_size)
+        # Flatten for MLP input
+        flat_embed = embedded.reshape(batch_size, -1)  # (batch, k*embed_size)
+        # Pass through MLP
+        return self.mlp(flat_embed)  # (batch, vocab_size)
+
+
 class KGramMLPSeqModel(nn.Module):
     """
     For each position t in [0..seq_len-1], gather the last k tokens => one-hot => MLP => logits.
@@ -160,9 +183,26 @@ class KGramMLPSeqModel(nn.Module):
         self.num_inner_layers = num_inner_layers
         self.chunk_size = chunk_size
 
-        # fill in
-
-        self.net = None
+        # Build MLP layers
+        layers = []
+        
+        # Input layer: k concatenated embeddings -> embed_size
+        layers.append(nn.Linear(k * embed_size, embed_size))
+        layers.append(nn.SiLU())
+        
+        # Inner layers
+        # embed size is the length of the embedding vector
+        for _ in range(num_inner_layers):
+            layers.append(nn.Linear(embed_size, embed_size))
+            layers.append(nn.SiLU())
+        
+        # Output layer: embed_size -> vocab_size
+        layers.append(nn.Linear(embed_size, vocab_size))
+        
+        mlp = nn.Sequential(*layers)
+        
+        # Create net module that converts one-hot to embeddings then passes through MLP
+        self.net = KGramNet(vocab_size, k, embed_size, mlp)
 
     def forward(self, tokens_seq):
         """
@@ -170,35 +210,82 @@ class KGramMLPSeqModel(nn.Module):
         return: (seq_len, batch, vocab_size)
         We'll do a loop over time steps. chunk_size can reduce overhead.
         """
+        # 🔹 1. Setup shapes
         seq_len, batch_size = tokens_seq.shape
+        
+        # If your input batch shape is:
+        # (seq_len=5, batch=3)
+        # Then:
+        # number of timesteps = 5
+        # number of sequences in batch = 3
+        # outputs will store logits for each timestep.
         outputs = []
 
+        # 🔹 2. Loop over sequence in chunks
         start = 0
         while start < seq_len:
             end = min(start + self.chunk_size, seq_len)
+            # This is only for memory-saving.
+            # If chunk_size=1, you process one timestep at a time.
+            # For now, think of it as:
+            # for t in 0..seq_len-1:
+            #     do computation
+            
             block_outputs = []
+            
+            # 🔹 3. Loop over each timestep t
             for t in range(start, end):
                 batch_logits = []
+                # This means:
+                # You are now predicting the next token at position t
+                # But you must compute the prediction for every batch element at this timestep.
+
+                # 🔹 4. Loop over batch elements b
                 for b in range(batch_size):
+                    # You process each sequence in the batch independently.
+
+                    # 🔹 5. Extract the last K tokens before t
                     if t < self.k:
+                        # Case B — t < K (beginning of sequence)
+                        # Example: K=3 and t=1.
+                        # You don't have enough past tokens → so you pad with zeros:
+                        # context_ids = [0, x₀]
+                        # This produces a fixed-length K context window.
                         needed = self.k - t
                         context_ids = [0]*needed + tokens_seq[:t, b].tolist()
                     else:
+                        # Case A — t ≥ K (normal case)
+                        # Example: K=3 and t=5.
+                        # You extract:
+                        # tokens_seq[2], tokens_seq[3], tokens_seq[4]
+                        # Mathematically: (x_{t-3}, x_{t-2}, x_{t-1})
                         context_ids = tokens_seq[t-self.k:t, b].tolist()
 
+                    # 🔹 6. Convert context tokens → one-hot vectors
                     context_oh = F.one_hot(
                         torch.tensor(context_ids, dtype=torch.long, device=tokens_seq.device),
                         num_classes=self.vocab_size
                     )
+                    # If vocab_size=50257 and K=3:
+                    # context_oh shape: (3, 50257)
+                    # Each row is a one-hot vector for one token
+                    
+                    # Flatten to (1, K*vocab_size) for MLP input
                     context_flat = context_oh.flatten().float().unsqueeze(0)
+                    
+                    # 🔹 7. Pass through network to get logits
                     logits_b = self.net(context_flat)  # (1, vocab_size)
                     batch_logits.append(logits_b)
+                
+                # Collect all batch predictions for this timestep
                 block_outputs.append(torch.cat(batch_logits, dim=0).unsqueeze(0))  # (1, batch, vocab_size)
 
+            # Concatenate all timesteps in this chunk
             block_outputs = torch.cat(block_outputs, dim=0)  # (chunk_size, batch, vocab_size)
             outputs.append(block_outputs)
             start = end
 
+        # Concatenate all chunks to get final output
         outputs = torch.cat(outputs, dim=0)  # (seq_len, batch, vocab_size)
         return outputs
 
@@ -235,16 +322,153 @@ class LSTMSeqModel(nn.Module):
 #    Very slow Python loop for training. Multi-head sums head outputs.
 ################################################################################
 
+class FeedForward(nn.Module):
+    """Feed-forward network with expansion factor"""
+    def __init__(self, d_model, expansion_factor=4):
+        super().__init__()
+        hidden_dim = d_model * expansion_factor
+        self.net = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, d_model)
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+
+
+class MultiHeadAttention(nn.Module):
+    """Multi-head scaled dot-product attention with causal masking"""
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        
+        # Q, K, V projections
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        
+        # Output projection
+        self.o_proj = nn.Linear(d_model, d_model)
+    
+    def forward(self, x):
+        batch_size, seq_len, _ = x.shape
+        
+        # Project to query, key, value
+        q = self.q_proj(x)  # (batch, seq, d_model)
+        k = self.k_proj(x)  # (batch, seq, d_model)
+        v = self.v_proj(x)  # (batch, seq, d_model)
+        
+        # Reshape to multiple heads
+        q = q.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # (batch, n_heads, seq, head_dim)
+        k = k.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # (batch, n_heads, seq, head_dim)
+        v = v.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # (batch, n_heads, seq, head_dim)
+        
+        # Compute attention scores with scaling
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # (batch, n_heads, seq, seq)
+        
+        # Apply causal mask - only attend to past tokens
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+        scores = scores.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        
+        # Apply softmax
+        attn_weights = F.softmax(scores, dim=-1)  # (batch, n_heads, seq, seq)
+        
+        # Apply attention to values
+        context = torch.matmul(attn_weights, v)  # (batch, n_heads, seq, head_dim)
+        
+        # Reshape back
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)  # (batch, seq, d_model)
+        
+        # Final projection
+        output = self.o_proj(context)  # (batch, seq, d_model)
+        
+        return output
+
+
+class TransformerBlock(nn.Module):
+    """Transformer block with pre-normalization architecture"""
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        # Pre-normalization for attention
+        self.norm1 = RMSNorm(d_model)
+        # Multi-head attention
+        self.attention = MultiHeadAttention(d_model, n_heads)
+        # Pre-normalization for feed-forward
+        self.norm2 = RMSNorm(d_model)
+        # Feed-forward network
+        self.ffn = FeedForward(d_model)
+    
+    def forward(self, x):
+        # Pre-norm with residual connection for attention
+        x = x + self.attention(self.norm1(x))
+        # Pre-norm with residual connection for feed-forward
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
-        pass
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    
+    def forward(self, x):
+        # Compute RMS: sqrt(mean(x^2) + eps)
+        norm = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        # Scale by learned weight
+        return self.weight * (x / norm)
 
 class TransformerModel(nn.Module):
     def __init__(self, vocab_size=50257, d_model=1024, n_heads=2, n_blocks=4):
         super().__init__()
-
-        pass
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_blocks = n_blocks
+        
+        # (a) Start with torch.nn.Embedding layer
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        
+        # (b) Create transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_model, n_heads)
+            for _ in range(n_blocks)
+        ])
+        
+        # Final normalization
+        self.norm = RMSNorm(d_model)
+        
+        # (c) Final unembedding layer to vocabulary size
+        self.lm_head = nn.Linear(d_model, vocab_size)
+    
+    def forward(self, tokens_seq):
+        """
+        tokens_seq: (seq_len, batch)
+        return: (seq_len, batch, vocab_size)
+        """
+        # Transpose to batch-first: (batch, seq_len)
+        x = tokens_seq.transpose(0, 1)
+        
+        # Embedding: (batch, seq_len, d_model)
+        x = self.embedding(x)
+        
+        # Process through transformer blocks
+        for block in self.blocks:
+            x = block(x)
+        
+        # Final normalization
+        x = self.norm(x)
+        
+        # Project to vocabulary
+        logits = self.lm_head(x)  # (batch, seq_len, vocab_size)
+        
+        # Transpose back to match expected output
+        logits = logits.transpose(0, 1)  # (seq_len, batch, vocab_size)
+        
+        return logits
 
 
 ################################################################################
@@ -261,7 +485,42 @@ def monosemantic_analysis_for_token(token_id, model, enc, device="cpu", top_n=5)
 ################################################################################
 
 def nucleus_sampling(logits, p=0.95):
-    return torch.argmax(logits).item()
+    """
+    Implements nucleus sampling (top-p sampling).
+    
+    1. Convert logits to probabilities via softmax
+    2. Sort tokens by probability (descending)
+    3. Find smallest k where cumulative probability >= p
+    4. Sample from the filtered distribution
+    """
+    # Convert logits to probabilities
+    probs = F.softmax(logits, dim=-1)
+    
+    # Sort probabilities in descending order
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    
+    # Calculate cumulative probabilities
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    
+    # Find indices where cumulative probability > p
+    sorted_indices_to_remove = cumulative_probs > p
+    
+    # Shift to include the first token exceeding p
+    sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+    sorted_indices_to_remove[0] = False  # Always keep at least one token
+    
+    # Filter the distribution
+    filtered_indices = sorted_indices[~sorted_indices_to_remove]
+    filtered_probs = sorted_probs[~sorted_indices_to_remove]
+    
+    # Renormalize probabilities
+    filtered_probs = filtered_probs / filtered_probs.sum()
+    
+    # Sample from the filtered distribution
+    sample_idx = torch.multinomial(filtered_probs, 1).item()
+    
+    # Return the corresponding token
+    return filtered_indices[sample_idx].item()
 
 
 def generate_text(model, enc, init_text, max_new_tokens=20, device="cpu",
@@ -535,12 +794,16 @@ def main():
     ).to(device)
 
     transformer = TransformerModel(
+        vocab_size=vocab_size,
+        d_model=embed_size,
+        n_heads=2,
+        n_blocks=4
     ).to(device)
 
     models = {
       # "kgram_mlp_seq": kgram_model,
         "lstm_seq": lstm_model,
-      # "kvcache_transformer": kv_transformer,
+        "transformer": transformer,
     }
 
 

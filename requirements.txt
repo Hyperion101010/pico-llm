@@ -1,0 +1,9 @@
+# PyTorch - deep learning framework
+torch>=2.0.0
+
+# HuggingFace datasets - for loading TinyStories dataset
+datasets>=2.14.0
+
+# tiktoken - OpenAI's tokenizer (GPT-2 encoding)
+tiktoken>=0.5.0
+
