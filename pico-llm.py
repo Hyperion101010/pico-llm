@@ -660,8 +660,10 @@ def compute_validation_loss(model, val_loader, device):
 
 # Global dictionary to store timestamp per model (for consistent file naming)
 _model_timestamps = {}
+_model_configs = {}  # Store configs per model
 
-def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, store_results, results_dir="results"):
+def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, store_results, 
+                        config_dict=None, results_dir="results"):
     """
     Save training results to a timestamped file.
     Uses the same timestamp for all epochs of the same model training run.
@@ -673,6 +675,7 @@ def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, sto
         val_loss: Validation loss (None if not computed)
         test_loss: Test loss (None if not computed)
         store_results: Boolean flag to enable/disable saving
+        config_dict: Dictionary of configuration arguments used for this run
         results_dir: Directory to save results files
     """
     if not store_results:
@@ -684,6 +687,8 @@ def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, sto
     # Get or create timestamp for this model (same timestamp for all epochs)
     if model_name not in _model_timestamps:
         _model_timestamps[model_name] = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if config_dict is not None:
+            _model_configs[model_name] = config_dict
     timestamp = _model_timestamps[model_name]
     
     filename = f"{results_dir}/{model_name}_results_{timestamp}.txt"
@@ -692,10 +697,30 @@ def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, sto
     mode = 'a' if os.path.exists(filename) else 'w'
     with open(filename, mode) as f:
         if mode == 'w':
-            # Write header on first write
+            # Write header and configuration on first write
             f.write(f"Results for {model_name}\n")
             f.write(f"Timestamp: {timestamp}\n")
             f.write("=" * 80 + "\n")
+            
+            # Write configuration if available
+            if config_dict is not None:
+                f.write("\nConfiguration:\n")
+                f.write("-" * 80 + "\n")
+                for key, value in sorted(config_dict.items()):
+                    if isinstance(value, dict):
+                        # Handle nested dictionaries (like nucleus_sampling_p_values)
+                        f.write(f"  {key}:\n")
+                        for sub_key, sub_value in sorted(value.items()):
+                            # Format None values more readably
+                            sub_value_str = "greedy (no sampling)" if sub_value is None else str(sub_value)
+                            f.write(f"    {sub_key}: {sub_value_str}\n")
+                    else:
+                        # Format None values more readably
+                        value_str = "None" if value is None else str(value)
+                        f.write(f"  {key}: {value_str}\n")
+                f.write("-" * 80 + "\n\n")
+            
+            # Write table header
             f.write(f"{'Epoch':<10} {'Train Loss':<15} {'Val Loss':<15} {'Test Loss':<15}\n")
             f.write("-" * 80 + "\n")
         
@@ -722,7 +747,8 @@ def train_one_model(model,
                     prompt="Once upon a",
                     val_loader=None,
                     test_loader=None,
-                    store_results=False):
+                    store_results=False,
+                    config_dict=None):
     """
     We add `prompt` as an explicit argument so we can pass it down from main().
     If store_results is True, saves training/validation/test losses to timestamped files.
@@ -815,7 +841,7 @@ def train_one_model(model,
             print(f"[{model_name}] *** End of Epoch {epoch} *** Val Loss: {val_loss:.4f}")
         
         # Save results for this epoch
-        save_results_to_file(model_name, epoch, avg_loss, val_loss, None, store_results)
+        save_results_to_file(model_name, epoch, avg_loss, val_loss, None, store_results, config_dict)
     
     # Compute test loss at the end of training if test set is provided
     test_loss = None
@@ -1041,6 +1067,33 @@ def main():
     ############################################################################
     # Train each model
     ############################################################################
+    # Create configuration dictionary for saving
+    config_dict = {
+        'device_id': str(device),
+        'tinystories_weight': args.tinystories_weight,
+        'input_files': args.input_files if args.input_files else 'None',
+        'block_size': block_size,
+        'embed_size': embed_size,
+        'batch_size': batch_size,
+        'num_epochs': num_epochs,
+        'learning_rate': learning_rate,
+        'val_split': args.val_split,
+        'test_split': args.test_split,
+        'kgram_k': k,
+        'kgram_chunk_size': chunk_size,
+        'num_inner_mlp_layers': num_inner_layers,
+        'max_steps_per_epoch': max_steps_per_epoch if max_steps_per_epoch else 'None',
+        'prompt': args.prompt,
+        'train_subset_size': train_subset_size,
+        'log_interval_steps': log_interval_steps,
+        'sample_interval_seconds': sample_interval_seconds,
+        'nucleus_sampling_p_values': {
+            'greedy': None,
+            'top_p_0.95': 0.95,
+            'top_p_1.0': 1.0
+        },
+    }
+    
     for model_name, model in models.items():
         print(f"\n=== Training model: {model_name} ===")
         train_one_model(
@@ -1057,7 +1110,8 @@ def main():
             prompt=args.prompt,  # <--- Pass the user-specified prompt here
             val_loader=val_loader,  # Pass validation loader
             test_loader=test_loader,  # Pass test loader
-            store_results=args.store_result  # Pass store_result flag
+            store_results=args.store_result,  # Pass store_result flag
+            config_dict=config_dict  # Pass configuration dictionary
         )
 
         # Final generation from the user-provided prompt (args.prompt).
