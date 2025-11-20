@@ -52,10 +52,10 @@ def parse_args():
                         help="Batch size for training. Default=16.")
     parser.add_argument("--num_epochs", type=int, default=3,
                         help="Number of training epochs. Default=3.")
-    parser.add_argument("--val_split", type=float, default=0.1,
-                        help="Fraction of data to use for validation (0.0 to 1.0). Default=0.1 (10%%).")
-    parser.add_argument("--test_split", type=float, default=0.1,
-                        help="Fraction of data to use for testing (0.0 to 1.0). Default=0.1 (10%%).")
+    parser.add_argument("--val_split", type=float, default=10.0,
+                        help="Percentage of data to use for validation (0.0 to 100.0). Default=10.0 (10%%).")
+    parser.add_argument("--test_split", type=float, default=10.0,
+                        help="Percentage of data to use for testing (0.0 to 100.0). Default=10.0 (10%%).")
 
     # Newly added device argument:
     parser.add_argument("--device_id", type=str, default="cuda:0",
@@ -852,19 +852,28 @@ def main():
     )
 
     # Split dataset into train, validation, and test
-    val_split = args.val_split
-    test_split = args.test_split
+    # Convert percentages to fractions
+    val_split_pct = args.val_split
+    test_split_pct = args.test_split
     dataset_size = len(combined_dataset)
     
-    # Calculate sizes for each split
-    val_size = int(val_split * dataset_size)
-    test_size = int(test_split * dataset_size)
+    # Validate percentages
+    if val_split_pct < 0 or val_split_pct > 100:
+        raise ValueError(f"val_split must be between 0 and 100, got {val_split_pct}")
+    if test_split_pct < 0 or test_split_pct > 100:
+        raise ValueError(f"test_split must be between 0 and 100, got {test_split_pct}")
+    if val_split_pct + test_split_pct > 100:
+        raise ValueError(f"val_split + test_split cannot exceed 100%, got {val_split_pct}% + {test_split_pct}% = {val_split_pct + test_split_pct}%")
+    
+    # Calculate sizes for each split (convert percentage to fraction)
+    val_size = int((val_split_pct / 100.0) * dataset_size)
+    test_size = int((test_split_pct / 100.0) * dataset_size)
     train_size = dataset_size - val_size - test_size
     
     # Ensure we have at least some training data
     if train_size <= 0:
         raise ValueError(f"Invalid splits: train_size={train_size}. Reduce val_split and/or test_split. "
-                        f"Current: val_split={val_split}, test_split={test_split}")
+                        f"Current: val_split={val_split_pct}%, test_split={test_split_pct}%")
     
     # Create splits list (only include non-zero splits)
     splits = [train_size]
@@ -888,8 +897,8 @@ def main():
         test_dataset = split_datasets[2] if test_size > 0 else None
         
         print(f"Dataset split: {train_size} train ({train_size/dataset_size*100:.1f}%), "
-              f"{val_size} validation ({val_split*100:.1f}%), "
-              f"{test_size} test ({test_split*100:.1f}%)")
+              f"{val_size} validation ({val_split_pct:.1f}%), "
+              f"{test_size} test ({test_split_pct:.1f}%)")
     else:
         train_dataset = combined_dataset
         val_dataset = None
