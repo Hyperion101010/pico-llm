@@ -730,6 +730,47 @@ def compute_validation_loss(model, val_loader, device):
 # Global dictionary to store timestamp per model (for consistent file naming)
 _model_timestamps = {}
 _model_configs = {}  # Store configs per model
+_model_checkpoints = {}  # Store checkpoint paths per model
+
+def save_model_checkpoint(model, model_name, store_results, checkpoints_dir="checkpoints"):
+    """
+    Save model checkpoint after training completes.
+    
+    Args:
+        model: The trained model
+        model_name: Name of the model
+        store_results: Boolean flag to enable/disable saving
+        checkpoints_dir: Directory to save checkpoint files
+    
+    Returns:
+        checkpoint_path: Path to saved checkpoint, or None if not saved
+    """
+    if not store_results:
+        return None
+    
+    # Create checkpoints directory if it doesn't exist
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    
+    # Use the same timestamp as the results file
+    if model_name in _model_timestamps:
+        timestamp = _model_timestamps[model_name]
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _model_timestamps[model_name] = timestamp
+    
+    checkpoint_path = f"{checkpoints_dir}/{model_name}_checkpoint_{timestamp}.pt"
+    
+    # Save model state dict
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'model_name': model_name,
+        'timestamp': timestamp,
+    }, checkpoint_path)
+    
+    _model_checkpoints[model_name] = checkpoint_path
+    print(f"[{model_name}] Model checkpoint saved to: {checkpoint_path}")
+    
+    return checkpoint_path
 
 def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, store_results, 
                         config_dict=None, results_dir="results"):
@@ -918,6 +959,21 @@ def train_one_model(model,
         
         # Save results for this epoch
         save_results_to_file(model_name, epoch, avg_loss, val_loss, test_loss, store_results, config_dict)
+    
+    # Save model checkpoint after training completes
+    checkpoint_path = save_model_checkpoint(model, model_name, store_results)
+    
+    # Update results file with checkpoint path if it exists
+    if checkpoint_path and store_results:
+        if model_name in _model_timestamps:
+            timestamp = _model_timestamps[model_name]
+            results_dir = "results"
+            filename = f"{results_dir}/{model_name}_results_{timestamp}.txt"
+            if os.path.exists(filename):
+                with open(filename, 'a') as f:
+                    f.write(f"\nModel Checkpoint: {checkpoint_path}\n")
+                    f.write("=" * 80 + "\n")
+                    f.flush()
     
     # Print final summary
     if test_loader is not None:
