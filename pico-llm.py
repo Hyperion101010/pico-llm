@@ -65,6 +65,8 @@ def parse_args():
                         help="If set, store training/validation/test results to timestamped files.")
     parser.add_argument("--model", type=str, default="all", choices=["all", "kgram", "lstm", "transformer"],
                         help="Which model(s) to train. 'all' trains all models. Default='all'.")
+    parser.add_argument("--train_subset_size", type=int, default=15000,
+                        help="Number of TinyStories samples to use for training. Smaller = faster training. Default=15000.")
 
     # Newly added device argument:
     parser.add_argument("--device_id", type=str, default="cuda:0",
@@ -998,7 +1000,7 @@ def main():
     learning_rate = 1e-3
 
     block_size = args.block_size
-    train_subset_size = 15000
+    train_subset_size = args.train_subset_size
     log_interval_steps = 150
     sample_interval_seconds = 150
 
