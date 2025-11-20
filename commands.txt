@@ -96,4 +96,5 @@ python pico-llm.py \
     --store_result \
     --prompt "Hi I am a Soldier" \
     --max_new_tokens 50 \
-    --model lstm
+    --model lstm \
+    --train_subset_size 15000
