@@ -63,6 +63,8 @@ def parse_args():
                         help="Percentage of data to use for testing (0.0 to 100.0). Default=10.0 (10%%).")
     parser.add_argument("--store_result", action="store_true",
                         help="If set, store training/validation/test results to timestamped files.")
+    parser.add_argument("--model", type=str, default="all", choices=["all", "kgram", "lstm", "transformer"],
+                        help="Which model(s) to train. 'all' trains all models. Default='all'.")
 
     # Newly added device argument:
     parser.add_argument("--device_id", type=str, default="cuda:0",
@@ -1116,11 +1118,19 @@ def main():
         n_blocks=4
     ).to(device)
 
-    models = {
-        "kgram_mlp_seq": kgram_model,
-        "lstm_seq": lstm_model,
-        "transformer": transformer,
+    # Filter models based on --model argument
+    all_models = {
+        "kgram": ("kgram_mlp_seq", kgram_model),
+        "lstm": ("lstm_seq", lstm_model),
+        "transformer": ("transformer", transformer),
     }
+    
+    if args.model == "all":
+        models = {name: model for name, model in all_models.values()}
+    else:
+        name, model = all_models[args.model]
+        models = {name: model}
+        print(f"Training only {args.model} model (use --model all to train all models)")
 
 
     ############################################################################

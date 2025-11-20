@@ -84,15 +84,16 @@ The loss for kgram does down so I can say that it atleast compiles properly.
 
 python pico-llm.py \
     --tinystories_weight 1 \
-    --block_size 1024 \
+    --block_size 256 \
     --embed_size 512 \
-    --batch_size 64 \
+    --batch_size 16 \
     --kgram_k 3 \
-    --kgram_chunk_size 100 \
-    --num_inner_mlp_layers 3 \
+    --kgram_chunk_size 16 \
+    --num_inner_mlp_layers 2 \
     --num_epochs 20 \
     --val_split 10.0 \
-    --test_split 10.0 \
+    --test_split 20.0 \
     --store_result \
     --prompt "Hi I am a Soldier" \
-    --max_new_tokens 50
+    --max_new_tokens 50 \
+    --model lstm
