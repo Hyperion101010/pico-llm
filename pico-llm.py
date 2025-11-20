@@ -46,6 +46,16 @@ def parse_args():
                         help="Dimension of the embedding layer for LSTM, MLP, etc. Default=1024.")
     parser.add_argument("--prompt", type=str, default="Once upon a",
                         help="Prompt used for generation. Default='Once upon a'.")
+    
+    # Training hyperparameters:
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Batch size for training. Default=16.")
+    parser.add_argument("--num_epochs", type=int, default=3,
+                        help="Number of training epochs. Default=3.")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Fraction of data to use for validation (0.0 to 1.0). Default=0.1 (10%%).")
+    parser.add_argument("--test_split", type=float, default=0.1,
+                        help="Fraction of data to use for testing (0.0 to 1.0). Default=0.1 (10%%).")
 
     # Newly added device argument:
     parser.add_argument("--device_id", type=str, default="cuda:0",
@@ -615,6 +625,34 @@ def generate_text(model, enc, init_text, max_new_tokens=20, device="cpu",
 # 8. Training
 ################################################################################
 
+def compute_validation_loss(model, val_loader, device):
+    """
+    Compute average loss on validation set.
+    
+    Args:
+        model: The model to evaluate
+        val_loader: DataLoader for validation set
+        device: Device to run on
+    
+    Returns:
+        Average validation loss
+    """
+    model.eval()
+    total_loss = 0.0
+    total_steps = 0
+    
+    with torch.no_grad():
+        for batch_tokens in val_loader:
+            batch_tokens = batch_tokens.to(device)  # (seq_len, batch)
+            logits = model(batch_tokens)  # (seq_len, batch, vocab_size)
+            loss = compute_next_token_loss(logits, batch_tokens)
+            total_loss += loss.item()
+            total_steps += 1
+    
+    avg_val_loss = total_loss / total_steps if total_steps > 0 else 0.0
+    return avg_val_loss
+
+
 def train_one_model(model,
                     loader,
                     epochs,
@@ -626,7 +664,9 @@ def train_one_model(model,
                     max_steps_per_epoch=None,
                     enc=None,
                     monosemantic_info=None,
-                    prompt="Once upon a"):
+                    prompt="Once upon a",
+                    val_loader=None,
+                    test_loader=None):
     """
     We add `prompt` as an explicit argument so we can pass it down from main().
     """
@@ -709,7 +749,19 @@ def train_one_model(model,
                 break
 
         avg_loss = total_loss / step_in_epoch
-        print(f"[{model_name}] *** End of Epoch {epoch} *** Avg Loss: {avg_loss:.4f}")
+        print(f"[{model_name}] *** End of Epoch {epoch} *** Train Avg Loss: {avg_loss:.4f}")
+        
+        # Compute validation loss if validation set is provided
+        if val_loader is not None:
+            val_loss = compute_validation_loss(model, val_loader, device)
+            print(f"[{model_name}] *** End of Epoch {epoch} *** Val Loss: {val_loss:.4f}")
+    
+    # Compute test loss at the end of training if test set is provided
+    if test_loader is not None:
+        test_loss = compute_validation_loss(model, test_loader, device)
+        print(f"\n[{model_name}] ========== FINAL TEST LOSS ==========")
+        print(f"[{model_name}] Test Loss: {test_loss:.4f}")
+        print(f"[{model_name}] ======================================\n")
 
 
 ################################################################################
@@ -724,8 +776,8 @@ def main():
     chunk_size = args.kgram_chunk_size
 
     embed_size = args.embed_size
-    batch_size = 16
-    num_epochs = 3
+    batch_size = args.batch_size
+    num_epochs = args.num_epochs
     learning_rate = 1e-3
 
     block_size = args.block_size
@@ -799,13 +851,78 @@ def main():
         p_tiny=p_tiny
     )
 
+    # Split dataset into train, validation, and test
+    val_split = args.val_split
+    test_split = args.test_split
+    dataset_size = len(combined_dataset)
+    
+    # Calculate sizes for each split
+    val_size = int(val_split * dataset_size)
+    test_size = int(test_split * dataset_size)
+    train_size = dataset_size - val_size - test_size
+    
+    # Ensure we have at least some training data
+    if train_size <= 0:
+        raise ValueError(f"Invalid splits: train_size={train_size}. Reduce val_split and/or test_split. "
+                        f"Current: val_split={val_split}, test_split={test_split}")
+    
+    # Create splits list (only include non-zero splits)
+    splits = [train_size]
+    if val_size > 0:
+        splits.append(val_size)
+    if test_size > 0:
+        splits.append(test_size)
+    
+    # Adjust last split to account for rounding
+    if sum(splits) != dataset_size:
+        splits[-1] += dataset_size - sum(splits)
+    
+    if len(splits) > 1:
+        split_datasets = torch.utils.data.random_split(
+            combined_dataset, splits,
+            generator=torch.Generator().manual_seed(42)  # For reproducibility
+        )
+        
+        train_dataset = split_datasets[0]
+        val_dataset = split_datasets[1] if val_size > 0 else None
+        test_dataset = split_datasets[2] if test_size > 0 else None
+        
+        print(f"Dataset split: {train_size} train ({train_size/dataset_size*100:.1f}%), "
+              f"{val_size} validation ({val_split*100:.1f}%), "
+              f"{test_size} test ({test_split*100:.1f}%)")
+    else:
+        train_dataset = combined_dataset
+        val_dataset = None
+        test_dataset = None
+        print(f"No validation or test set. Using all {dataset_size} samples for training.")
+
     train_loader = torch.utils.data.DataLoader(
-        combined_dataset,
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
         collate_fn=seq_collate_fn
     )
+    
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,  # No need to shuffle validation set
+            num_workers=0,
+            collate_fn=seq_collate_fn
+        )
+    
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,  # No need to shuffle test set
+            num_workers=0,
+            collate_fn=seq_collate_fn
+        )
 
     ############################################################################
     # Models
@@ -854,7 +971,9 @@ def main():
             sample_interval=sample_interval_seconds,
             max_steps_per_epoch=max_steps_per_epoch,
             enc=enc,
-            prompt=args.prompt  # <--- Pass the user-specified prompt here
+            prompt=args.prompt,  # <--- Pass the user-specified prompt here
+            val_loader=val_loader,  # Pass validation loader
+            test_loader=test_loader  # Pass test loader
         )
 
         # Final generation from the user-provided prompt (args.prompt).
