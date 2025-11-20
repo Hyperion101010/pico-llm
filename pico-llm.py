@@ -49,6 +49,8 @@ def parse_args():
                         help="Dimension of the embedding layer for LSTM, MLP, etc. Default=1024.")
     parser.add_argument("--prompt", type=str, default="Once upon a",
                         help="Prompt used for generation. Default='Once upon a'.")
+    parser.add_argument("--max_new_tokens", type=int, default=50,
+                        help="Maximum number of new tokens to generate during text generation. Default=50.")
     
     # Training hyperparameters:
     parser.add_argument("--batch_size", type=int, default=16,
@@ -491,8 +493,73 @@ class TransformerModel(nn.Module):
 ################################################################################
 
 
+def extract_token_embeddings(model, vocab_size, device="cpu"):
+    """
+    Extract token embeddings from the model.
+    Works for models with embedding layers (LSTM, Transformer, KGram).
+    
+    Args:
+        model: The model (LSTMSeqModel, TransformerModel, or KGramMLPSeqModel)
+        vocab_size: Vocabulary size
+        device: Device to run on
+    
+    Returns:
+        embeddings: (vocab_size, embed_dim) tensor
+    """
+    model.eval()
+    with torch.no_grad():
+        if hasattr(model, 'embedding'):
+            # LSTM or Transformer
+            all_tokens = torch.arange(vocab_size, device=device)
+            embeddings = model.embedding(all_tokens)  # (vocab_size, embed_dim)
+        elif hasattr(model, 'net') and hasattr(model.net, 'embedding'):
+            # KGramMLPSeqModel
+            all_tokens = torch.arange(vocab_size, device=device)
+            embeddings = model.net.embedding(all_tokens)  # (vocab_size, embed_dim)
+        else:
+            # Fallback: create dummy embeddings (shouldn't happen)
+            raise ValueError("Model doesn't have accessible embeddings")
+    
+    return embeddings
+
+
 def monosemantic_analysis_for_token(token_id, model, enc, device="cpu", top_n=5):
-    return []
+    """
+    Find nearest neighbor tokens using embedding distance.
+    
+    Args:
+        token_id: The token ID to analyze
+        model: The trained model
+        enc: Tokenizer encoder
+        device: Device to run on
+        top_n: Number of neighbors to return
+    
+    Returns:
+        List of tuples (distance, neighbor_token_id) sorted by distance
+    """
+    vocab_size = enc.n_vocab
+    
+    # Extract embeddings for all tokens
+    try:
+        embeddings = extract_token_embeddings(model, vocab_size, device)
+    except ValueError:
+        # Model doesn't support embedding extraction
+        return []
+    
+    # Get embedding for the target token
+    target_embedding = embeddings[token_id:token_id+1]  # (1, embed_dim)
+    
+    # Compute distances to all other tokens
+    distances = torch.cdist(target_embedding, embeddings).squeeze(0)  # (vocab_size,)
+    
+    # Get top_n nearest neighbors (excluding the token itself)
+    distances[token_id] = float('inf')  # Exclude self
+    top_indices = torch.topk(distances, k=min(top_n, vocab_size-1), largest=False).indices
+    
+    # Return list of (distance, neighbor_token_id) tuples
+    neighbors = [(distances[idx].item(), idx.item()) for idx in top_indices]
+    
+    return neighbors
 
 
 ################################################################################
@@ -569,7 +636,7 @@ def nucleus_sampling(logits, p=0.95):
     return filtered_indices[sample_idx].item()
 
 
-def generate_text(model, enc, init_text, max_new_tokens=20, device="cpu",
+def generate_text(model, enc, init_text, max_new_tokens=50, device="cpu",
                   top_p=None,
                   monosemantic_info=None,
                   do_monosemantic=False):
@@ -602,7 +669,7 @@ def generate_text(model, enc, init_text, max_new_tokens=20, device="cpu",
 
             if do_monosemantic and monosemantic_info is not None:
                 neighbors = monosemantic_analysis_for_token(
-                    chosen_token, model, monosemantic_info, enc, device=device, top_n=5
+                    chosen_token, model, enc, device=device, top_n=5
                 )
                 annotation_list.append((chosen_token, neighbors))
             else:
@@ -745,6 +812,7 @@ def train_one_model(model,
                     enc=None,
                     monosemantic_info=None,
                     prompt="Once upon a",
+                    max_new_tokens=50,
                     val_loader=None,
                     test_loader=None,
                     store_results=False,
@@ -796,7 +864,7 @@ def train_one_model(model,
                 with torch.no_grad():
                     print(f"\n[{model_name}] Generating sample text (greedy) at epoch={epoch}, step={batch_idx}...")
                     text_greedy, ann_greedy = generate_text(
-                        model, enc, prompt, max_new_tokens=20, device=device,
+                        model, enc, prompt, max_new_tokens=max_new_tokens, device=device,
                         top_p=None,
                         monosemantic_info=monosemantic_info,
                         do_monosemantic=(monosemantic_info is not None)
@@ -806,7 +874,7 @@ def train_one_model(model,
 
                     print(f"[{model_name}] Generating sample text (top-p=0.95) at epoch={epoch}, step={batch_idx}...")
                     text_topp, ann_topp = generate_text(
-                        model, enc, prompt, max_new_tokens=20, device=device,
+                        model, enc, prompt, max_new_tokens=max_new_tokens, device=device,
                         top_p=0.95,
                         monosemantic_info=monosemantic_info,
                         do_monosemantic=(monosemantic_info is not None)
@@ -817,7 +885,7 @@ def train_one_model(model,
                     # third generation => top-p=1.0 => full distribution random sampling
                     print(f"[{model_name}] Generating sample text (top-p=1.0) at epoch={epoch}, step={batch_idx}...")
                     text_topp1, ann_topp1 = generate_text(
-                        model, enc, prompt, max_new_tokens=20, device=device,
+                        model, enc, prompt, max_new_tokens=max_new_tokens, device=device,
                         top_p=1.0,
                         monosemantic_info=monosemantic_info,
                         do_monosemantic=(monosemantic_info is not None)
@@ -840,28 +908,19 @@ def train_one_model(model,
             val_loss = compute_validation_loss(model, val_loader, device)
             print(f"[{model_name}] *** End of Epoch {epoch} *** Val Loss: {val_loss:.4f}")
         
-        # Save results for this epoch
-        save_results_to_file(model_name, epoch, avg_loss, val_loss, None, store_results, config_dict)
-    
-    # Compute test loss at the end of training if test set is provided
-    test_loss = None
-    if test_loader is not None:
-        test_loss = compute_validation_loss(model, test_loader, device)
-        print(f"\n[{model_name}] ========== FINAL TEST LOSS ==========")
-        print(f"[{model_name}] Test Loss: {test_loss:.4f}")
-        print(f"[{model_name}] ======================================\n")
+        # Compute test loss if test set is provided
+        test_loss = None
+        if test_loader is not None:
+            test_loss = compute_validation_loss(model, test_loader, device)
+            print(f"[{model_name}] *** End of Epoch {epoch} *** Test Loss: {test_loss:.4f}")
         
-        # Save final test loss
-        if store_results:
-            # Use the same timestamp that was used for this model's training
-            if model_name in _model_timestamps:
-                timestamp = _model_timestamps[model_name]
-                results_dir = "results"
-                filename = f"{results_dir}/{model_name}_results_{timestamp}.txt"
-                with open(filename, 'a') as f:
-                    f.write(f"{'FINAL':<10} {'N/A':<15} {'N/A':<15} {test_loss:<15.4f}\n")
-                    f.write("=" * 80 + "\n")
-                    f.flush()
+        # Save results for this epoch
+        save_results_to_file(model_name, epoch, avg_loss, val_loss, test_loss, store_results, config_dict)
+    
+    # Print final summary
+    if test_loader is not None:
+        print(f"\n[{model_name}] ========== TRAINING COMPLETE ==========")
+        print(f"[{model_name}] ======================================\n")
 
 
 ################################################################################
@@ -881,9 +940,9 @@ def main():
     learning_rate = 1e-3
 
     block_size = args.block_size
-    train_subset_size = 20000
-    log_interval_steps = 100
-    sample_interval_seconds = 30
+    train_subset_size = 15000
+    log_interval_steps = 150
+    sample_interval_seconds = 150
 
     max_steps_per_epoch = args.max_steps_per_epoch
     num_inner_layers = args.num_inner_mlp_layers
@@ -1084,6 +1143,7 @@ def main():
         'num_inner_mlp_layers': num_inner_layers,
         'max_steps_per_epoch': max_steps_per_epoch if max_steps_per_epoch else 'None',
         'prompt': args.prompt,
+        'max_new_tokens': args.max_new_tokens,
         'train_subset_size': train_subset_size,
         'log_interval_steps': log_interval_steps,
         'sample_interval_seconds': sample_interval_seconds,
@@ -1108,6 +1168,7 @@ def main():
             max_steps_per_epoch=max_steps_per_epoch,
             enc=enc,
             prompt=args.prompt,  # <--- Pass the user-specified prompt here
+            max_new_tokens=args.max_new_tokens,  # Pass max_new_tokens
             val_loader=val_loader,  # Pass validation loader
             test_loader=test_loader,  # Pass test loader
             store_results=args.store_result,  # Pass store_result flag
@@ -1118,17 +1179,17 @@ def main():
         with torch.no_grad():
             # 1) Greedy
             text_greedy, ann_greedy = generate_text(
-                model, enc, args.prompt, max_new_tokens=20, device=device,
+                model, enc, args.prompt, max_new_tokens=args.max_new_tokens, device=device,
                 top_p=None,
             )
             # 2) top-p=0.95
             text_topp, ann_topp = generate_text(
-                model, enc, args.prompt, max_new_tokens=20, device=device,
+                model, enc, args.prompt, max_new_tokens=args.max_new_tokens, device=device,
                 top_p=0.95,
             )
             # 3) top-p=1.0 => full distribution random sampling
             text_topp1, ann_topp1 = generate_text(
-                model, enc, args.prompt, max_new_tokens=20, device=device,
+                model, enc, args.prompt, max_new_tokens=args.max_new_tokens, device=device,
                 top_p=1.0,
             )
 
