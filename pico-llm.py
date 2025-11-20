@@ -3,6 +3,9 @@ import argparse
 import time
 import random
 import math
+import os
+import glob
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -56,6 +59,8 @@ def parse_args():
                         help="Percentage of data to use for validation (0.0 to 100.0). Default=10.0 (10%%).")
     parser.add_argument("--test_split", type=float, default=10.0,
                         help="Percentage of data to use for testing (0.0 to 100.0). Default=10.0 (10%%).")
+    parser.add_argument("--store_result", action="store_true",
+                        help="If set, store training/validation/test results to timestamped files.")
 
     # Newly added device argument:
     parser.add_argument("--device_id", type=str, default="cuda:0",
@@ -653,6 +658,56 @@ def compute_validation_loss(model, val_loader, device):
     return avg_val_loss
 
 
+# Global dictionary to store timestamp per model (for consistent file naming)
+_model_timestamps = {}
+
+def save_results_to_file(model_name, epoch, train_loss, val_loss, test_loss, store_results, results_dir="results"):
+    """
+    Save training results to a timestamped file.
+    Uses the same timestamp for all epochs of the same model training run.
+    
+    Args:
+        model_name: Name of the model
+        epoch: Current epoch number
+        train_loss: Training loss for this epoch
+        val_loss: Validation loss (None if not computed)
+        test_loss: Test loss (None if not computed)
+        store_results: Boolean flag to enable/disable saving
+        results_dir: Directory to save results files
+    """
+    if not store_results:
+        return
+    
+    # Create results directory if it doesn't exist
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Get or create timestamp for this model (same timestamp for all epochs)
+    if model_name not in _model_timestamps:
+        _model_timestamps[model_name] = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = _model_timestamps[model_name]
+    
+    filename = f"{results_dir}/{model_name}_results_{timestamp}.txt"
+    
+    # Append results to file
+    mode = 'a' if os.path.exists(filename) else 'w'
+    with open(filename, mode) as f:
+        if mode == 'w':
+            # Write header on first write
+            f.write(f"Results for {model_name}\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"{'Epoch':<10} {'Train Loss':<15} {'Val Loss':<15} {'Test Loss':<15}\n")
+            f.write("-" * 80 + "\n")
+        
+        # Write epoch results
+        epoch_str = str(epoch)
+        train_str = f"{train_loss:.4f}" if train_loss is not None else "N/A"
+        val_str = f"{val_loss:.4f}" if val_loss is not None else "N/A"
+        test_str = f"{test_loss:.4f}" if test_loss is not None else "N/A"
+        f.write(f"{epoch_str:<10} {train_str:<15} {val_str:<15} {test_str:<15}\n")
+        f.flush()  # Ensure data is written immediately
+
+
 def train_one_model(model,
                     loader,
                     epochs,
@@ -666,9 +721,11 @@ def train_one_model(model,
                     monosemantic_info=None,
                     prompt="Once upon a",
                     val_loader=None,
-                    test_loader=None):
+                    test_loader=None,
+                    store_results=False):
     """
     We add `prompt` as an explicit argument so we can pass it down from main().
+    If store_results is True, saves training/validation/test losses to timestamped files.
     """
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -752,16 +809,33 @@ def train_one_model(model,
         print(f"[{model_name}] *** End of Epoch {epoch} *** Train Avg Loss: {avg_loss:.4f}")
         
         # Compute validation loss if validation set is provided
+        val_loss = None
         if val_loader is not None:
             val_loss = compute_validation_loss(model, val_loader, device)
             print(f"[{model_name}] *** End of Epoch {epoch} *** Val Loss: {val_loss:.4f}")
+        
+        # Save results for this epoch
+        save_results_to_file(model_name, epoch, avg_loss, val_loss, None, store_results)
     
     # Compute test loss at the end of training if test set is provided
+    test_loss = None
     if test_loader is not None:
         test_loss = compute_validation_loss(model, test_loader, device)
         print(f"\n[{model_name}] ========== FINAL TEST LOSS ==========")
         print(f"[{model_name}] Test Loss: {test_loss:.4f}")
         print(f"[{model_name}] ======================================\n")
+        
+        # Save final test loss
+        if store_results:
+            # Use the same timestamp that was used for this model's training
+            if model_name in _model_timestamps:
+                timestamp = _model_timestamps[model_name]
+                results_dir = "results"
+                filename = f"{results_dir}/{model_name}_results_{timestamp}.txt"
+                with open(filename, 'a') as f:
+                    f.write(f"{'FINAL':<10} {'N/A':<15} {'N/A':<15} {test_loss:<15.4f}\n")
+                    f.write("=" * 80 + "\n")
+                    f.flush()
 
 
 ################################################################################
@@ -982,7 +1056,8 @@ def main():
             enc=enc,
             prompt=args.prompt,  # <--- Pass the user-specified prompt here
             val_loader=val_loader,  # Pass validation loader
-            test_loader=test_loader  # Pass test loader
+            test_loader=test_loader,  # Pass test loader
+            store_results=args.store_result  # Pass store_result flag
         )
 
         # Final generation from the user-provided prompt (args.prompt).

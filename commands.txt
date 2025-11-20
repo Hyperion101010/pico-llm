@@ -1,0 +1,97 @@
+# Command one
+
+python starter.py \
+    --tinystories_weight 0.0 \
+    --input_files 3seqs.txt \
+    --block_size 32 \
+    --embed_size 64 \
+    --prompt "0 1 2"
+
+
+# Task 1 answers:
+
+“For Task 1, I ran the provided LSTM baseline on a tiny dataset with block_size=32 and confirmed that the model runs end-to-end: batching works, embeddings work, the LSTM outputs logits of shape (seq_len, batch, vocab_size), the loss decreases, and text generation produces tokens. That’s the sanity check.”
+
+“What is nn.Embedding doing?”
+
+It maps token IDs to dense vectors, instead of using huge one-hot vectors.
+So instead of a 50,000-dimensional one-hot, each token becomes a 64-dim vector.
+This makes training efficient and gives the model a learned representation space.
+
+“Why do we do next-token prediction?”
+
+My model gets a sequence 
+𝑥
+0
+,
+𝑥
+1
+,
+…
+x
+0
+	​
+
+,x
+1
+	​
+
+,…
+At position 
+𝑡
+t, it tries to predict token 
+𝑥
+𝑡
++
+1
+x
+t+1
+	​
+
+That's standard autoregressive training.
+
+“How do you know the code is correct?”
+
+You show three things:
+
+Loader produces batches of shape (seq_len, batch).
+
+LSTM returns output shape (seq_len, batch, vocab_size).
+
+Loss decreases and text generation prints something coherent.
+
+
+
+# Task 2 answers:
+
+Sanity check Command:
+
+python pico-llm.py \
+    --tinystories_weight 0.5 \
+    --input_files 3seqs.txt \
+    --block_size 32 \
+    --embed_size 64 \
+    --kgram_k 3 \   
+    --kgram_chunk_size 1 \
+    --num_inner_mlp_layers 1 \
+    --max_steps_per_epoch 10 \
+    --prompt "0 1 2"
+
+The loss for kgram does down so I can say that it atleast compiles properly.
+
+
+# Task 3 answers:
+
+python pico-llm.py \
+    --tinystories_weight 1 \
+    --block_size 32 \
+    --embed_size 1024 \
+    --batch_size 16 \
+    --kgram_k 3 \
+    --kgram_chunk_size 16 \
+    --num_inner_mlp_layers 4 \
+    --num_epochs 20 \
+    --val_split 10.0 \
+    --test_split 10.0 \
+    --store_result \
+    --prompt "Hi I am a Soldier"
