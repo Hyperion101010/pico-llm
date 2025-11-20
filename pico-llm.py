@@ -488,38 +488,69 @@ def nucleus_sampling(logits, p=0.95):
     """
     Implements nucleus sampling (top-p sampling).
     
+    Algorithm:
     1. Convert logits to probabilities via softmax
-    2. Sort tokens by probability (descending)
-    3. Find smallest k where cumulative probability >= p
-    4. Sample from the filtered distribution
+    2. Sort tokens by probability (descending): p(1) ≥ p(2) ≥ ... ≥ p(vocab_size)
+    3. Find smallest k where: p(1) + ... + p(k-1) < p ≤ p(1) + ... + p(k)
+    4. Sample from the filtered distribution p(1), ..., p(k) only
+    
+    How varying p affects generated text:
+    - p → 0.0 (very small): Only the most likely token(s) are considered
+      → More deterministic, repetitive, conservative text
+      → Lower diversity, but more coherent
+  
+    - p = 0.5-0.9: Moderate nucleus size
+      → Balanced creativity and coherence
+      → Good for most creative writing tasks
+  
+    - p = 0.9-0.95 (typical): Large nucleus, excludes only very unlikely tokens
+      → More diverse and creative text
+      → Still maintains reasonable coherence
+  
+    - p → 1.0: Includes almost all tokens (approaches full softmax sampling)
+      → Maximum diversity and creativity
+      → May produce less coherent or more random text
+      → Can include very unlikely tokens that might be nonsensical
+    
+    Args:
+        logits: Tensor of shape (vocab_size,) - raw model outputs
+        p: Nucleus probability threshold (0.0 to 1.0)
+    
+    Returns:
+        sampled_token_id: Integer token ID sampled from the nucleus
     """
-    # Convert logits to probabilities
+    # Step 1: Convert logits to probabilities
     probs = F.softmax(logits, dim=-1)
     
-    # Sort probabilities in descending order
+    # Step 2: Sort probabilities in descending order
+    # sorted_probs: [p(1), p(2), ..., p(vocab_size)] where p(1) ≥ p(2) ≥ ...
+    # sorted_indices: [idx_1, idx_2, ...] - original token indices in sorted order
     sorted_probs, sorted_indices = torch.sort(probs, descending=True)
     
-    # Calculate cumulative probabilities
+    # Step 3: Calculate cumulative probabilities
+    # cumulative_probs[i] = p(1) + p(2) + ... + p(i)
     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
     
     # Find indices where cumulative probability > p
+    # This marks tokens beyond the nucleus threshold
     sorted_indices_to_remove = cumulative_probs > p
     
-    # Shift to include the first token exceeding p
+    # Shift to include the first token that makes cumulative prob >= p
+    # This ensures we include token k where: p(1)+...+p(k-1) < p ≤ p(1)+...+p(k)
     sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
     sorted_indices_to_remove[0] = False  # Always keep at least one token
     
-    # Filter the distribution
+    # Step 4: Filter the distribution to keep only nucleus tokens
     filtered_indices = sorted_indices[~sorted_indices_to_remove]
     filtered_probs = sorted_probs[~sorted_indices_to_remove]
     
-    # Renormalize probabilities
+    # Renormalize probabilities so they sum to 1
     filtered_probs = filtered_probs / filtered_probs.sum()
     
     # Sample from the filtered distribution
     sample_idx = torch.multinomial(filtered_probs, 1).item()
     
-    # Return the corresponding token
+    # Return the corresponding original token ID
     return filtered_indices[sample_idx].item()
 
 
