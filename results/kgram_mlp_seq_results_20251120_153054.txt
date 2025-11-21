@@ -1,0 +1,35 @@
+Results for kgram_mlp_seq
+Timestamp: 20251120_153054
+================================================================================
+
+Configuration:
+--------------------------------------------------------------------------------
+  batch_size: 16
+  block_size: 256
+  device_id: cuda:0
+  embed_size: 512
+  input_files: None
+  kgram_chunk_size: 16
+  kgram_k: 3
+  learning_rate: 0.001
+  log_interval_steps: 150
+  max_new_tokens: 50
+  max_steps_per_epoch: None
+  nucleus_sampling_p_values:
+    greedy: greedy (no sampling)
+    top_p_0.95: 0.95
+    top_p_1.0: 1.0
+  num_epochs: 5
+  num_inner_mlp_layers: 2
+  prompt: Hi I am a Soldier
+  sample_interval_seconds: 150
+  test_split: 20.0
+  tinystories_weight: 1.0
+  train_subset_size: 15000
+  val_split: 10.0
+--------------------------------------------------------------------------------
+
+Epoch      Train Loss      Val Loss        Test Loss      
+--------------------------------------------------------------------------------
+1          3.8815          3.4200          3.4674         
+2          3.3453          3.2732          3.2664         
